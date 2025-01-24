@@ -1,39 +1,28 @@
+import os
+import sqlite3
+import time
+import json
+import threading
+import requests
+import websocket
 from flask import Flask, render_template, request, jsonify, redirect, url_for, session
 from flask_socketio import SocketIO, emit
-from dotenv import load_dotenv
 from werkzeug.security import generate_password_hash, check_password_hash
-import sqlite3
-import threading
-import json
-import websocket
-import requests
-import time
-import os
-import logging
+from dotenv import load_dotenv
 
 app = Flask(__name__)
-app.secret_key = os.urandom(24)  # Ensure this is secure in production
-app.config['PERMANENT_SESSION_LIFETIME'] = 1800  # Session expires in 30 minutes
+app.secret_key = os.urandom(24)  # Set a secret key for session management
 socketio = SocketIO(app)
 
-# API Key and WebSocket symbols
 COINMARKETCAP_API_KEY = "d2731549-19f8-405a-8017-6df613de03dd"
 allowed_symbols = ["dogeusdt", "btcusdt", "ethusdt", "bnbusdt", "xrpusdt", "solusdt"]
-
-# Caching for API rates
-cache = {}
-cache_expiry = 300
-
-# Logging setup
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Latest prices storage
 latest_prices = {}
+cache = {}
+cache_expiry = 300  # Cache expiry time in seconds
 
 
-# --- Helper Functions ---
 def get_conversion_rate(from_currency, to_currency):
+    """Fetch conversion rate between two currencies."""
     key = f"{from_currency}_{to_currency}"
     if key in cache and time.time() - cache[key]["timestamp"] < cache_expiry:
         return cache[key]["rate"]
@@ -42,54 +31,58 @@ def get_conversion_rate(from_currency, to_currency):
     headers = {"X-CMC_PRO_API_KEY": COINMARKETCAP_API_KEY}
     params = {"amount": 1, "symbol": from_currency, "convert": to_currency}
 
-    response = requests.get(url, headers=headers, params=params)
-    if response.status_code == 200:
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
         rate = response.json()["data"]["quote"][to_currency]["price"]
         cache[key] = {"rate": rate, "timestamp": time.time()}
         return rate
-    else:
-        raise Exception(f"API Error: {response.text}")
+    except requests.exceptions.RequestException as e:
+        raise Exception(f"API Error: {e}")
 
 
-# --- WebSocket Functions ---
 def on_message(ws, message):
+    """Handle incoming WebSocket messages."""
     try:
         data = json.loads(message)
         symbol = data["s"].lower()
         price = float(data["c"])  # Current price
         volume = float(data["v"])  # Volume
-        price_change = float(data["P"])  # Percent change
+        price_change = float(data["P"])  # Price change
         latest_prices[symbol.upper()] = {
             "price": price,
             "volume": volume,
             "change": price_change,
         }
-
         socketio.emit(
             "price_update",
             {"symbol": symbol.upper(), "price": price, "volume": volume, "change": price_change},
         )
     except Exception as e:
-        logger.error(f"Error processing message: {e}, message: {message}")
+        print(f"Error processing message: {e}")
 
 
 def on_error(ws, error):
-    logger.error(f"WebSocket Error: {error}")
+    """Handle WebSocket errors."""
+    print(f"WebSocket Error: {error}")
 
 
 def on_close(ws):
-    logger.info("### WebSocket closed ###")
+    """Handle WebSocket closure."""
+    print("### WebSocket closed ###")
 
 
 def on_open(ws):
-    logger.info("### WebSocket opened ###")
+    """Subscribe to relevant WebSocket streams."""
+    print("### WebSocket opened ###")
     params = [f"{symbol}@ticker" for symbol in allowed_symbols]
     subscribe_message = {"method": "SUBSCRIBE", "params": params, "id": 1}
     ws.send(json.dumps(subscribe_message))
 
 
 def start_websocket():
-    websocket.enableTrace(False)
+    """Start the WebSocket connection to receive live updates."""
+    websocket.enableTrace(True)
     ws = websocket.WebSocketApp(
         "wss://stream.binance.com:9443/ws",
         on_message=on_message,
@@ -106,9 +99,9 @@ ws_thread.daemon = True
 ws_thread.start()
 
 
-# --- Routes ---
 @app.route("/convert", methods=["GET"])
 def convert_currency():
+    """Convert between currencies."""
     try:
         amount = float(request.args.get("amount"))
         from_currency = request.args.get("from", "USD")
@@ -126,6 +119,7 @@ def convert_currency():
 
 @app.route("/candlestick/<symbol>")
 def candlestick(symbol):
+    """Render candlestick chart for a specific symbol."""
     if symbol.lower() not in allowed_symbols:
         return "Invalid coin symbol", 404
     return render_template("candlestick.html", symbol=symbol.upper())
@@ -133,6 +127,7 @@ def candlestick(symbol):
 
 @app.route("/get-candlestick-data", methods=["GET"])
 def get_candlestick_data():
+    """Fetch candlestick data for a specific symbol and time range."""
     symbol = request.args.get("symbol", "").upper()
     interval = request.args.get("interval", "1h")
     start = request.args.get("start")
@@ -142,8 +137,13 @@ def get_candlestick_data():
         return jsonify({"error": "Invalid coin symbol"}), 400
 
     url = f"https://api.binance.com/api/v3/klines"
-    params = {"symbol": symbol.upper(), "interval": interval, "limit": 1000}
+    params = {
+        "symbol": symbol.upper(),
+        "interval": interval,
+        "limit": 1000,  # Binance max is 1000 per request
+    }
 
+    # Add date range if provided
     if start:
         params["startTime"] = int(time.mktime(time.strptime(start, "%Y-%m-%d"))) * 1000
     if end:
@@ -154,7 +154,7 @@ def get_candlestick_data():
         data = response.json()
         candlestick_data = [
             {
-                "time": int(item[0] / 1000),
+                "time": int(item[0] / 1000),  # Convert milliseconds to seconds
                 "open": float(item[1]),
                 "high": float(item[2]),
                 "low": float(item[3]),
@@ -169,29 +169,31 @@ def get_candlestick_data():
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
+    """Handle login functionality."""
     if request.method == "POST":
         username = request.form.get("username")
         password = request.form.get("password")
 
-        with sqlite3.connect("users.db") as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT password FROM users WHERE username = ?", (username,))
-            user = cursor.fetchone()
+        try:
+            with sqlite3.connect("users.db") as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT password FROM users WHERE username = ?", (username,))
+                user = cursor.fetchone()
 
-        if not user:
-            return render_template("login.html", error="Username does not exist")
-        elif not check_password_hash(user[0], password):
-            logger.info(f"Failed login attempt for username: {username}")
-            return render_template("login.html", error="Incorrect password")
-        else:
-            session["username"] = username
-            return redirect(url_for("index"))
+            if user and check_password_hash(user[0], password):
+                session["username"] = username
+                return redirect(url_for("index"))
+            else:
+                return render_template("login.html", error="Invalid credentials")
+        except Exception as e:
+            return render_template("login.html", error=f"Error: {str(e)}")
 
     return render_template("login.html")
 
 
 @app.route("/register", methods=["GET", "POST"])
 def register():
+    """Handle user registration."""
     if request.method == "POST":
         username = request.form.get("username")
         password = request.form.get("password")
@@ -204,22 +206,25 @@ def register():
                 conn.commit()
             return redirect(url_for("login"))
         except sqlite3.IntegrityError:
-            return render_template("register.html", error="Username already exists. Please use a different email.")
+            return render_template("register.html", error="Username already exists")
         except Exception as e:
-            return render_template("register.html", error=f"An unexpected error occurred: {str(e)}")
+            return render_template("register.html", error=f"Error: {str(e)}")
 
     return render_template("register.html")
 
 
 @app.route("/")
 def index():
+    """Render homepage with user data."""
     if "username" not in session:
         return redirect(url_for("login"))
+
     return render_template("index.html", allowed_symbols=allowed_symbols, username=session["username"])
 
 
 @app.route("/logout")
 def logout():
+    """Handle user logout."""
     session.pop("username", None)
     return redirect(url_for("login"))
 
