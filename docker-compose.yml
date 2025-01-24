@@ -1,0 +1,8 @@
+version: "3.9"
+services:
+  app:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      - COINMARKETCAP_API_KEY=d2731549-19f8-405a-8017-6df613de03dd
