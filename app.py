@@ -1,10 +1,15 @@
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, redirect, url_for, session
 from flask_socketio import SocketIO, emit
+from dotenv import load_dotenv
+from werkzeug.security import generate_password_hash, check_password_hash
+import sqlite3
 import threading
 import json
 import websocket
 import requests
 import time
+import os
+
 
 app = Flask(__name__)
 socketio = SocketIO(app)
@@ -97,9 +102,6 @@ def convert_currency():
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
-@app.route("/")
-def index():
-    return render_template("index.html", allowed_symbols=allowed_symbols)
 
 @app.route("/candlestick/<symbol>")
 def candlestick(symbol):
@@ -146,6 +148,69 @@ def get_candlestick_data():
         return jsonify(candlestick_data)
     else:
         return jsonify({"error": "Failed to fetch candlestick data"}), 500
+    
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    """
+    Login route with session handling.
+    """
+    if request.method == "POST":
+        username = request.form.get("username")
+        password = request.form.get("password")
+
+        with sqlite3.connect("users.db") as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT password FROM users WHERE username = ?", (username,))
+            user = cursor.fetchone()
+
+        if user and check_password_hash(user[0], password):
+            session["username"] = username
+            return redirect(url_for("index"))
+        else:
+            return render_template("login.html", error="Invalid credentials")
+
+    return render_template("login.html")
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    """
+    User registration route.
+    """
+    if request.method == "POST":
+        username = request.form.get("username")
+        password = request.form.get("password")
+
+        hashed_password = generate_password_hash(password)
+
+        try:
+            with sqlite3.connect("users.db") as conn:
+                cursor = conn.cursor()
+                cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, hashed_password))
+                conn.commit()
+            return redirect(url_for("login"))
+        except sqlite3.IntegrityError:
+            return render_template("register.html", error="Username already exists")
+
+    return render_template("register.html")    
+
+
+@app.route("/")    
+def index():
+    """
+    Main route to render the homepage.
+    """
+    if "username" not in session:
+        return redirect(url_for("login"))
+
+    return render_template("index.html", allowed_symbols=allowed_symbols, username=session["username"])
+    
+@app.route("/logout")
+def logout():
+    """
+    Logout route to clear the session.
+    """
+    session.pop("username", None)
+    return redirect(url_for("login"))
 
 if __name__ == "__main__":
     socketio.run(app, host="0.0.0.0", port=5000, debug=True)
