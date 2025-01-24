@@ -9,19 +9,30 @@ import websocket
 import requests
 import time
 import os
-
+import logging
 
 app = Flask(__name__)
+app.secret_key = os.urandom(24)  # Ensure this is secure in production
+app.config['PERMANENT_SESSION_LIFETIME'] = 1800  # Session expires in 30 minutes
 socketio = SocketIO(app)
 
+# API Key and WebSocket symbols
 COINMARKETCAP_API_KEY = "d2731549-19f8-405a-8017-6df613de03dd"
 allowed_symbols = ["dogeusdt", "btcusdt", "ethusdt", "bnbusdt", "xrpusdt", "solusdt"]
 
+# Caching for API rates
+cache = {}
+cache_expiry = 300
+
+# Logging setup
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Latest prices storage
 latest_prices = {}
 
-cache = {}
-cache_expiry = 300  
 
+# --- Helper Functions ---
 def get_conversion_rate(from_currency, to_currency):
     key = f"{from_currency}_{to_currency}"
     if key in cache and time.time() - cache[key]["timestamp"] < cache_expiry:
@@ -39,13 +50,15 @@ def get_conversion_rate(from_currency, to_currency):
     else:
         raise Exception(f"API Error: {response.text}")
 
+
+# --- WebSocket Functions ---
 def on_message(ws, message):
     try:
         data = json.loads(message)
         symbol = data["s"].lower()
-        price = float(data["c"])  
-        volume = float(data["v"]) 
-        price_change = float(data["P"]) 
+        price = float(data["c"])  # Current price
+        volume = float(data["v"])  # Volume
+        price_change = float(data["P"])  # Percent change
         latest_prices[symbol.upper()] = {
             "price": price,
             "volume": volume,
@@ -57,22 +70,26 @@ def on_message(ws, message):
             {"symbol": symbol.upper(), "price": price, "volume": volume, "change": price_change},
         )
     except Exception as e:
-        print(f"Error processing message: {e}, message: {message}")
+        logger.error(f"Error processing message: {e}, message: {message}")
+
 
 def on_error(ws, error):
-    print(f"WebSocket Error: {error}")
+    logger.error(f"WebSocket Error: {error}")
+
 
 def on_close(ws):
-    print("### WebSocket closed ###")
+    logger.info("### WebSocket closed ###")
+
 
 def on_open(ws):
-    print("### WebSocket opened ###")
+    logger.info("### WebSocket opened ###")
     params = [f"{symbol}@ticker" for symbol in allowed_symbols]
     subscribe_message = {"method": "SUBSCRIBE", "params": params, "id": 1}
     ws.send(json.dumps(subscribe_message))
 
+
 def start_websocket():
-    websocket.enableTrace(True)
+    websocket.enableTrace(False)
     ws = websocket.WebSocketApp(
         "wss://stream.binance.com:9443/ws",
         on_message=on_message,
@@ -82,10 +99,14 @@ def start_websocket():
     ws.on_open = on_open
     ws.run_forever()
 
+
+# Start WebSocket in a separate thread
 ws_thread = threading.Thread(target=start_websocket)
 ws_thread.daemon = True
 ws_thread.start()
 
+
+# --- Routes ---
 @app.route("/convert", methods=["GET"])
 def convert_currency():
     try:
@@ -109,6 +130,7 @@ def candlestick(symbol):
         return "Invalid coin symbol", 404
     return render_template("candlestick.html", symbol=symbol.upper())
 
+
 @app.route("/get-candlestick-data", methods=["GET"])
 def get_candlestick_data():
     symbol = request.args.get("symbol", "").upper()
@@ -120,13 +142,8 @@ def get_candlestick_data():
         return jsonify({"error": "Invalid coin symbol"}), 400
 
     url = f"https://api.binance.com/api/v3/klines"
-    params = {
-        "symbol": symbol.upper(),
-        "interval": interval,
-        "limit": 1000,  # Binance max is 1000 per request
-    }
+    params = {"symbol": symbol.upper(), "interval": interval, "limit": 1000}
 
-    # Add date range if provided
     if start:
         params["startTime"] = int(time.mktime(time.strptime(start, "%Y-%m-%d"))) * 1000
     if end:
@@ -137,7 +154,7 @@ def get_candlestick_data():
         data = response.json()
         candlestick_data = [
             {
-                "time": int(item[0] / 1000),  # Convert milliseconds to seconds
+                "time": int(item[0] / 1000),
                 "open": float(item[1]),
                 "high": float(item[2]),
                 "low": float(item[3]),
@@ -148,12 +165,10 @@ def get_candlestick_data():
         return jsonify(candlestick_data)
     else:
         return jsonify({"error": "Failed to fetch candlestick data"}), 500
-    
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
-    """
-    Login route with session handling.
-    """
     if request.method == "POST":
         username = request.form.get("username")
         password = request.form.get("password")
@@ -163,23 +178,23 @@ def login():
             cursor.execute("SELECT password FROM users WHERE username = ?", (username,))
             user = cursor.fetchone()
 
-        if user and check_password_hash(user[0], password):
+        if not user:
+            return render_template("login.html", error="Username does not exist")
+        elif not check_password_hash(user[0], password):
+            logger.info(f"Failed login attempt for username: {username}")
+            return render_template("login.html", error="Incorrect password")
+        else:
             session["username"] = username
             return redirect(url_for("index"))
-        else:
-            return render_template("login.html", error="Invalid credentials")
 
     return render_template("login.html")
 
+
 @app.route("/register", methods=["GET", "POST"])
 def register():
-    """
-    User registration route.
-    """
     if request.method == "POST":
         username = request.form.get("username")
         password = request.form.get("password")
-
         hashed_password = generate_password_hash(password)
 
         try:
@@ -189,28 +204,25 @@ def register():
                 conn.commit()
             return redirect(url_for("login"))
         except sqlite3.IntegrityError:
-            return render_template("register.html", error="Username already exists")
+            return render_template("register.html", error="Username already exists. Please use a different email.")
+        except Exception as e:
+            return render_template("register.html", error=f"An unexpected error occurred: {str(e)}")
 
-    return render_template("register.html")    
+    return render_template("register.html")
 
 
-@app.route("/")    
+@app.route("/")
 def index():
-    """
-    Main route to render the homepage.
-    """
     if "username" not in session:
         return redirect(url_for("login"))
-
     return render_template("index.html", allowed_symbols=allowed_symbols, username=session["username"])
-    
+
+
 @app.route("/logout")
 def logout():
-    """
-    Logout route to clear the session.
-    """
     session.pop("username", None)
     return redirect(url_for("login"))
+
 
 if __name__ == "__main__":
     socketio.run(app, host="0.0.0.0", port=5000, debug=True)
