@@ -15,7 +15,7 @@ app.secret_key = os.urandom(24)  # Set a secret key for session management
 socketio = SocketIO(app)
 
 COINMARKETCAP_API_KEY = "d2731549-19f8-405a-8017-6df613de03dd"
-allowed_symbols = ["dogeusdt", "btcusdt", "ethusdt", "bnbusdt", "xrpusdt", "solusdt"]
+allowed_symbols = ["dogeusdt", "btcusdt", "ethusdt", "bnbusdt", "xrpusdt", "solusdt", "spellusdt"]
 latest_prices = {}
 cache = {}
 cache_expiry = 300  # Cache expiry time in seconds
@@ -136,25 +136,29 @@ def get_candlestick_data():
     if symbol.lower() not in allowed_symbols:
         return jsonify({"error": "Invalid coin symbol"}), 400
 
-    url = f"https://api.binance.com/api/v3/klines"
+    url = "https://api.binance.com/api/v3/klines"
     params = {
         "symbol": symbol.upper(),
         "interval": interval,
-        "limit": 1000,  # Binance max is 1000 per request
+        "limit": 100,  # Binance max is 1000 per request
     }
 
-    # Add date range if provided
     if start:
         params["startTime"] = int(time.mktime(time.strptime(start, "%Y-%m-%d"))) * 1000
     if end:
         params["endTime"] = int(time.mktime(time.strptime(end, "%Y-%m-%d"))) * 1000
 
+    print("Fetching data from Binance:", params)  # Debugging Line
+
     response = requests.get(url, params=params)
+    print("Binance API Response Code:", response.status_code)  # Debugging Line
+    print("Binance API Response:", response.text)  # Debugging Line
+
     if response.status_code == 200:
         data = response.json()
         candlestick_data = [
             {
-                "time": int(item[0] / 1000),  # Convert milliseconds to seconds
+                "time": int(item[0] / 1000),
                 "open": float(item[1]),
                 "high": float(item[2]),
                 "low": float(item[3]),
@@ -231,3 +235,4 @@ def logout():
 
 if __name__ == "__main__":
     socketio.run(app, host="0.0.0.0", port=5000, debug=True)
+
